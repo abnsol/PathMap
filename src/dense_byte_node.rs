@@ -30,6 +30,7 @@ pub struct ByteNode<Cf, A: Allocator> {
     values: Vec<Cf, A>,
     #[cfg(not(feature = "nightly"))]
     values: Vec<Cf>,
+    agg_w: u64,
     alloc: A,
 }
 
@@ -73,6 +74,7 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> Clone for ByteN
             refcnt: std::sync::atomic::AtomicU32::new(1),
             mask: self.mask,
             values: self.values.clone(),
+            agg_w: self.agg_w,
             alloc: self.alloc.clone(),
         }
     }
@@ -107,6 +109,7 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
             refcnt: std::sync::atomic::AtomicU32::new(1),
             mask,
             values: values.v,
+            agg_w: 0,
             alloc,
         }
     }
@@ -1414,6 +1417,12 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> TrieNode<V, A> 
     }
     fn clone_self(&self) -> TrieNodeODRc<V, A> {
         TrieNodeODRc::new_in(self.clone(), self.alloc.clone())
+    }
+    fn agg_w(&self) -> u64 {
+        self.agg_w
+    }
+    fn set_agg_w(&mut self, val: u64) {
+        self.agg_w = val;
     }
 }
 

@@ -313,6 +313,10 @@ impl<'a, V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for TinyRefNode<'a
     fn clone_self(&self) -> TrieNodeODRc<V, A> {
         TrieNodeODRc::new_in(self.clone(), self.alloc.clone())
     }
+    fn agg_w(&self) -> u64 {
+        0
+    }
+    fn set_agg_w(&mut self, _val: u64) {}
 }
 
 impl<V: Clone + Send + Sync, A: Allocator> TrieNodeDowncast<V, A> for TinyRefNode<'_, V, A> {

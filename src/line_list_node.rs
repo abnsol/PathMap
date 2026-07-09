@@ -27,6 +27,7 @@ pub struct LineListNode<V: Clone + Send + Sync, A: Allocator> {
     header: u16,
     val_or_child0: ValOrChildUnion<V, A>,
     val_or_child1: ValOrChildUnion<V, A>,
+    agg_w: u64,
     alloc: A
 }
 //DISCUSSION: Choosing a KEY_BYTES_CNT size
@@ -167,6 +168,7 @@ impl<V: Clone + Send + Sync, A: Allocator> Clone for LineListNode<V, A> {
             key_bytes: self.key_bytes,
             val_or_child0,
             val_or_child1,
+            agg_w: self.agg_w,
             alloc: self.alloc.clone(),
         };
         debug_assert!(validate_node(&new_node));
@@ -231,6 +233,7 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
             key_bytes: [MaybeUninit::uninit(); KEY_BYTES_CNT],
             val_or_child0: ValOrChildUnion{ _unused: () },
             val_or_child1: ValOrChildUnion{ _unused: () },
+            agg_w: 0,
             alloc,
         }
     }
@@ -2693,6 +2696,12 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
     fn clone_self(&self) -> TrieNodeODRc<V, A> {
         TrieNodeODRc::new_in(self.clone(), self.alloc.clone())
     }
+    fn agg_w(&self) -> u64 {
+        self.agg_w
+    }
+    fn set_agg_w(&mut self, val: u64) {
+        self.agg_w = val;
+    }
 }
 
 impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
@@ -2822,9 +2831,9 @@ mod tests {
     fn test_line_list_node() {
         // assert_eq!(core::mem::size_of::<LineListNode<[u8; 1024]>>(), 64);
         #[cfg(feature = "slim_ptrs")]
-        assert_eq!(core::mem::size_of::<LineListNode<[u8; 1024], GlobalAlloc>>(), 64);
+        assert_eq!(core::mem::size_of::<LineListNode<[u8; 1024], GlobalAlloc>>(), 72);
         #[cfg(not(feature = "slim_ptrs"))]
-        assert_eq!(core::mem::size_of::<LineListNode<[u8; 1024], GlobalAlloc>>(), 48); //Shrunk to account for DynBox header
+        assert_eq!(core::mem::size_of::<LineListNode<[u8; 1024], GlobalAlloc>>(), 56); //Shrunk to account for DynBox header
 
         //A simple test with a V that fits inside 16 bytes, only testing slot_0
         let mut new_node = LineListNode::<usize, GlobalAlloc>::new_in(global_alloc());

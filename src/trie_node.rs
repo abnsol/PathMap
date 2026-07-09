@@ -351,6 +351,12 @@ pub(crate) trait TrieNode<V: Clone + Send + Sync, A: Allocator>: TrieNodeDowncas
 
     /// Returns a clone of the node in its own Rc
     fn clone_self(&self) -> TrieNodeODRc<V, A>;
+
+    /// Aggregate weight of the subtree rooted at this node (own values + children's agg_w).
+    fn agg_w(&self) -> u64;
+
+    /// Set the aggregate weight.
+    fn set_agg_w(&mut self, val: u64);
 }
 
 /// Implements methods to get the concrete type from a dynamic TrieNode

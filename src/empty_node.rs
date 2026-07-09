@@ -143,6 +143,10 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for EmptyNode {
     fn clone_self(&self) -> TrieNodeODRc<V, A> {
         unreachable!() //If we end up hitting this, we should change it at the call site
     }
+    fn agg_w(&self) -> u64 {
+        0
+    }
+    fn set_agg_w(&mut self, _val: u64) {}
 }
 
 impl<V: Clone + Send + Sync, A: Allocator> TrieNodeDowncast<V, A> for EmptyNode {
