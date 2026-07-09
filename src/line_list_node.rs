@@ -2702,6 +2702,28 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
     fn set_agg_w(&mut self, val: u64) {
         self.agg_w = val;
     }
+    fn recompute_agg_w(&mut self) where V: Into<u64> {
+        let mut total = 0u64;
+        if self.is_used::<0>() {
+            if self.is_child_ptr::<0>() {
+                let child = unsafe{ self.child_in_slot::<0>() };
+                total += child.as_tagged().agg_w();
+            } else {
+                let v = unsafe{ self.val_in_slot::<0>() };
+                total += v.clone().into();
+            }
+        }
+        if self.is_used::<1>() {
+            if self.is_child_ptr::<1>() {
+                let child = unsafe{ self.child_in_slot::<1>() };
+                total += child.as_tagged().agg_w();
+            } else {
+                let v = unsafe{ self.val_in_slot::<1>() };
+                total += v.clone().into();
+            }
+        }
+        self.agg_w = total;
+    }
 }
 
 impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {

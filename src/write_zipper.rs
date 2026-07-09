@@ -503,6 +503,19 @@ impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperWriting
     fn prune_ascend(&mut self) -> usize { self.z.prune_ascend() }
 }
 
+impl<'a, 'path, V: Clone + Send + Sync + Unpin + Into<u64>, A: Allocator + 'a> WriteZipperTracked<'a, 'path, V, A> {
+    pub fn set_val_w(&mut self, val: V) -> Option<V> {
+        let result = self.z.set_val(val);
+        self.z.propagate_agg_w_ancestors();
+        result
+    }
+    pub fn remove_val_w(&mut self, prune: bool) -> Option<V> {
+        let result = self.z.remove_val(prune);
+        self.z.propagate_agg_w_ancestors();
+        result
+    }
+}
+
 impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperPriv<V, A> for WriteZipperTracked<'a, 'path, V, A> {
     fn take_focus(&mut self, prune: bool) -> Option<TrieNodeODRc<V, A>> { self.z.take_focus(prune) }
     fn take_root_prefix_path(&mut self) -> Vec<u8> { self.z.take_root_prefix_path() }
@@ -1374,6 +1387,21 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
             Some(result)
         } else {
             None
+        }
+    }
+    /// Walk from the current focus up to root recomputing agg_w at each ancestor.
+    /// The focus node's agg_w should already be up-to-date before calling this.
+    /// After this method, the stack is consumed (all ancestors popped) — caller must reset.
+    pub fn propagate_agg_w_ancestors(&mut self) where V: Into<u64> {
+        while self.focus_stack.depth() > 0 {
+            if let Some(mut node) = self.focus_stack.top_mut() {
+                node.recompute_agg_w();
+            }
+            if self.focus_stack.depth() > 1 {
+                self.focus_stack.backtrack();
+            } else {
+                break;
+            }
         }
     }
     /// See [WriteZipper::zipper_head]

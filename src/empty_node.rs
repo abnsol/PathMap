@@ -147,6 +147,7 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for EmptyNode {
         0
     }
     fn set_agg_w(&mut self, _val: u64) {}
+    fn recompute_agg_w(&mut self) where V: Into<u64> {}
 }
 
 impl<V: Clone + Send + Sync, A: Allocator> TrieNodeDowncast<V, A> for EmptyNode {

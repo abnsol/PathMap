@@ -999,6 +999,9 @@ impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ReadZipperTra
         let core = ReadZipperCore::new_with_node_and_cloned_path_in(root_node, owned_root, path, root_prefix_len, root_key_start, root_val, alloc);
         Self { z: core, tracker }
     }
+    pub fn agg_w(&self) -> u64 {
+        self.borrow_raw_parts().0.agg_w()
+    }
 }
 
 //GOAT, the standard prototype of IntoIterator isn't compatible with ReadZipperTracked anymore because 

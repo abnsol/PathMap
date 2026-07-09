@@ -1424,6 +1424,18 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> TrieNode<V, A> 
     fn set_agg_w(&mut self, val: u64) {
         self.agg_w = val;
     }
+    fn recompute_agg_w(&mut self) where V: Into<u64> {
+        let mut total = 0u64;
+        for cf in self.values.iter() {
+            if let Some(v) = cf.val() {
+                total += v.clone().into();
+            }
+            if let Some(child) = cf.rec() {
+                total += child.as_tagged().agg_w();
+            }
+        }
+        self.agg_w = total;
+    }
 }
 
 impl<V: Clone + Send + Sync, A: Allocator> TrieNodeDowncast<V, A> for ByteNode<OrdinaryCoFree<V, A>, A> {

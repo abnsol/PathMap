@@ -357,6 +357,10 @@ pub(crate) trait TrieNode<V: Clone + Send + Sync, A: Allocator>: TrieNodeDowncas
 
     /// Set the aggregate weight.
     fn set_agg_w(&mut self, val: u64);
+
+    /// Recompute aggregate weight from own values and children's agg_w.
+    /// Called after structural changes to the subtree.
+    fn recompute_agg_w(&mut self) where V: Into<u64>;
 }
 
 /// Implements methods to get the concrete type from a dynamic TrieNode
@@ -855,6 +859,16 @@ mod tagged_node_ref {
         #[inline]
         pub fn empty_node() -> Self {
             Self::EmptyNode
+        }
+        #[inline]
+        pub fn agg_w(&self) -> u64 {
+            match self {
+                Self::DenseByteNode(node) => node.agg_w(),
+                Self::LineListNode(node) => node.agg_w(),
+                Self::CellByteNode(node) => node.agg_w(),
+                Self::TinyRefNode(node) => node.agg_w(),
+                Self::EmptyNode => 0,
+            }
         }
         #[cfg(feature = "slim_ptrs")]
         #[inline]
@@ -1677,6 +1691,13 @@ mod tagged_node_ref {
                 Self::CellByteNode(node) => node.convert_to_cell_node(),
             }
         }
+        pub fn recompute_agg_w(&mut self) where V: Into<u64> {
+            match self {
+                Self::DenseByteNode(node) => node.recompute_agg_w(),
+                Self::LineListNode(node) => node.recompute_agg_w(),
+                Self::CellByteNode(node) => node.recompute_agg_w(),
+            }
+        }
     }
 }
 
@@ -2368,6 +2389,15 @@ mod tagged_node_ref {
                 DENSE_BYTE_NODE_TAG => unsafe{ &mut *ptr.cast::<DenseByteNode<V, A>>() }.convert_to_cell_node(),
                 LINE_LIST_NODE_TAG => unsafe{ &mut *ptr.cast::<LineListNode<V, A>>() }.convert_to_cell_node(),
                 CELL_BYTE_NODE_TAG => unsafe{ &mut *ptr.cast::<CellByteNode<V, A>>() }.convert_to_cell_node(),
+                _ => unsafe{ unreachable_unchecked() }
+            }
+        }
+        pub fn recompute_agg_w(&mut self) where V: Into<u64> {
+            let (ptr, tag) = self.ptr.get_raw_parts();
+            match tag {
+                DENSE_BYTE_NODE_TAG => unsafe{ &mut *ptr.cast::<DenseByteNode<V, A>>() }.recompute_agg_w(),
+                LINE_LIST_NODE_TAG => unsafe{ &mut *ptr.cast::<LineListNode<V, A>>() }.recompute_agg_w(),
+                CELL_BYTE_NODE_TAG => unsafe{ &mut *ptr.cast::<CellByteNode<V, A>>() }.recompute_agg_w(),
                 _ => unsafe{ unreachable_unchecked() }
             }
         }
