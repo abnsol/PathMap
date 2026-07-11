@@ -1698,6 +1698,20 @@ mod tagged_node_ref {
                 Self::CellByteNode(node) => node.recompute_agg_w(),
             }
         }
+        pub fn agg_w(&self) -> u64 {
+            match self {
+                Self::DenseByteNode(node) => node.agg_w(),
+                Self::LineListNode(node) => node.agg_w(),
+                Self::CellByteNode(node) => node.agg_w(),
+            }
+        }
+        pub fn set_agg_w(&mut self, val: u64) {
+            match self {
+                Self::DenseByteNode(node) => node.set_agg_w(val),
+                Self::LineListNode(node) => node.set_agg_w(val),
+                Self::CellByteNode(node) => node.set_agg_w(val),
+            }
+        }
     }
 }
 
@@ -2398,6 +2412,24 @@ mod tagged_node_ref {
                 DENSE_BYTE_NODE_TAG => unsafe{ &mut *ptr.cast::<DenseByteNode<V, A>>() }.recompute_agg_w(),
                 LINE_LIST_NODE_TAG => unsafe{ &mut *ptr.cast::<LineListNode<V, A>>() }.recompute_agg_w(),
                 CELL_BYTE_NODE_TAG => unsafe{ &mut *ptr.cast::<CellByteNode<V, A>>() }.recompute_agg_w(),
+                _ => unsafe{ unreachable_unchecked() }
+            }
+        }
+        pub fn agg_w(&self) -> u64 {
+            let (ptr, tag) = self.ptr.get_raw_parts();
+            match tag {
+                DENSE_BYTE_NODE_TAG => unsafe{ &*ptr.cast::<DenseByteNode<V, A>>() }.agg_w(),
+                LINE_LIST_NODE_TAG => unsafe{ &*ptr.cast::<LineListNode<V, A>>() }.agg_w(),
+                CELL_BYTE_NODE_TAG => unsafe{ &*ptr.cast::<CellByteNode<V, A>>() }.agg_w(),
+                _ => unsafe{ unreachable_unchecked() }
+            }
+        }
+        pub fn set_agg_w(&mut self, val: u64) {
+            let (ptr, tag) = self.ptr.get_raw_parts();
+            match tag {
+                DENSE_BYTE_NODE_TAG => unsafe{ &mut *ptr.cast::<DenseByteNode<V, A>>() }.set_agg_w(val),
+                LINE_LIST_NODE_TAG => unsafe{ &mut *ptr.cast::<LineListNode<V, A>>() }.set_agg_w(val),
+                CELL_BYTE_NODE_TAG => unsafe{ &mut *ptr.cast::<CellByteNode<V, A>>() }.set_agg_w(val),
                 _ => unsafe{ unreachable_unchecked() }
             }
         }

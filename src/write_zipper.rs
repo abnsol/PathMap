@@ -505,13 +505,27 @@ impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperWriting
 
 impl<'a, 'path, V: Clone + Send + Sync + Unpin + Into<u64>, A: Allocator + 'a> WriteZipperTracked<'a, 'path, V, A> {
     pub fn set_val_w(&mut self, val: V) -> Option<V> {
+        // Capture the root node + its key-start BEFORE the write, since `set_val`'s
+        // `mend_root` may replace `focus_stack.root` with a deeper node.
+        let saved = self.z.focus_stack.root_mut()
+            .map(|r| r as *mut TrieNodeODRc<V, A>);
+        let saved_key_start = self.z.key.root_key_start;
         let result = self.z.set_val(val);
-        self.z.propagate_agg_w_ancestors();
+        if let Some(ptr) = saved {
+            self.z.propagate_agg_w(ptr, saved_key_start);
+        }
         result
     }
+    /// Remove value at the zipper's current position, then propagate aggregate weight changes.
     pub fn remove_val_w(&mut self, prune: bool) -> Option<V> {
+        // Capture the root node BEFORE the write, consistent with set_val_w.
+        let saved = self.z.focus_stack.root_mut()
+            .map(|r| r as *mut TrieNodeODRc<V, A>);
+        let saved_key_start = self.z.key.root_key_start;
         let result = self.z.remove_val(prune);
-        self.z.propagate_agg_w_ancestors();
+        if let Some(ptr) = saved {
+            self.z.propagate_agg_w(ptr, saved_key_start);
+        }
         result
     }
 }
@@ -683,6 +697,33 @@ impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperPr
 crate::zipper::impl_zipper_debug!(
     impl<'a, 'path, V: Clone + Send + Sync + Unpin + 'a, A: Allocator + 'a> core::fmt::Debug for WriteZipperUntracked<'a, 'path, V, A>
 );
+
+impl<'a, 'path, V: Clone + Send + Sync + Unpin + Into<u64>, A: Allocator + 'a> WriteZipperUntracked<'a, 'path, V, A> {
+    pub fn set_val_w(&mut self, val: V) -> Option<V> {
+        // Capture the root node + its key-start BEFORE the write, since `set_val`'s
+        // `mend_root` may replace `focus_stack.root` with a deeper node.
+        let saved = self.z.focus_stack.root_mut()
+            .map(|r| r as *mut TrieNodeODRc<V, A>);
+        let saved_key_start = self.z.key.root_key_start;
+        let result = self.z.set_val(val);
+        if let Some(ptr) = saved {
+            self.z.propagate_agg_w(ptr, saved_key_start);
+        }
+        result
+    }
+    /// Remove value at the zipper's current position, then propagate aggregate weight changes.
+    pub fn remove_val_w(&mut self, prune: bool) -> Option<V> {
+        // Capture the root node BEFORE the write, consistent with set_val_w.
+        let saved = self.z.focus_stack.root_mut()
+            .map(|r| r as *mut TrieNodeODRc<V, A>);
+        let saved_key_start = self.z.key.root_key_start;
+        let result = self.z.remove_val(prune);
+        if let Some(ptr) = saved {
+            self.z.propagate_agg_w(ptr, saved_key_start);
+        }
+        result
+    }
+}
 
 // ***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---
 // WriteZipperOwned
@@ -1363,9 +1404,10 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
             core::mem::swap(unsafe{&mut **root_val_ref}, &mut temp_val);
             return temp_val
         }
-        let (old_val, created_subnode) = self.in_zipper_mut_static_result(
+        let result = self.in_zipper_mut_static_result(
             |node, remaining_key| node.node_set_val(remaining_key, val),
             |_new_leaf_node, _remaining_key| (None, true));
+        let (old_val, created_subnode): (Option<V>, bool) = result;
         if created_subnode {
             self.mend_root();
             self.descend_to_internal();
@@ -1389,18 +1431,68 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
             None
         }
     }
-    /// Walk from the current focus up to root recomputing agg_w at each ancestor.
-    /// The focus node's agg_w should already be up-to-date before calling this.
-    /// After this method, the stack is consumed (all ancestors popped) — caller must reset.
-    pub fn propagate_agg_w_ancestors(&mut self) where V: Into<u64> {
-        while self.focus_stack.depth() > 0 {
-            if let Some(mut node) = self.focus_stack.top_mut() {
-                node.recompute_agg_w();
+    /// Recompute `agg_w` on every node from the zipper's root down to the focus, then
+    /// fold in the separately-stored root value.
+    ///
+    /// This walks the *real* trie child pointers starting from `saved_root_ptr` (the
+    /// `focus_stack` root captured by the caller BEFORE the mutation) rather than the
+    /// `focus_stack`. That matters for two reasons:
+    /// - `set_val` may call `mend_root`, which replaces `focus_stack.root` with a deeper
+    ///   node and discards the intermediate ancestors from the stack — so the stack can
+    ///   no longer be trusted to enumerate every ancestor. Following child pointers from
+    ///   the saved root reconstructs the full chain (both real stack frames and the nodes
+    ///   `mend_root` collapsed).
+    /// - It touches neither `focus_stack` nor `self.key`, so the zipper's focus position
+    ///   is preserved and navigation can continue from where it left off after a `_w`
+    ///   write (the persistent-cursor property that a plain stack pop-up would break).
+    ///
+    /// `saved_root_key_start` is the `key.root_key_start` captured alongside the root
+    /// pointer, i.e. the offset into the path at which the saved root node's key begins.
+    pub(crate) fn propagate_agg_w(&mut self, saved_root_ptr: *mut TrieNodeODRc<V, A>, saved_root_key_start: usize) where V: Into<u64> {
+        // The full path (map-root .. focus). Once buffers are prepared `prefix_buf` holds
+        // it; otherwise the original `origin_path` slice does. The path bytes are stable
+        // across the preceding mutation, so slicing from the saved key-start is valid.
+        let full_path: &[u8] = if self.key.prefix_buf.len() > 0 {
+            unsafe { core::slice::from_raw_parts(self.key.prefix_buf.as_ptr(), self.key.prefix_buf.len()) }
+        } else {
+            unsafe { self.key.origin_path.as_slice_unchecked() }
+        };
+        // Path from the saved (pre-mutation) root node down to the focus.
+        let path = &full_path[saved_root_key_start..];
+
+        // Collect the node chain root..focus by following actual child edges.
+        let mut ancestors: Vec<*mut TrieNodeODRc<V, A>> = Vec::new();
+        let mut cur = saved_root_ptr;
+        let mut remaining = path;
+        loop {
+            ancestors.push(cur);
+            let cur_ref = unsafe { &mut *cur };
+            match cur_ref.make_mut().node_into_child_mut(remaining) {
+                Some((consumed, child)) => {
+                    remaining = &remaining[consumed..];
+                    cur = child as *mut TrieNodeODRc<V, A>;
+                    if remaining.len() == 0 { break; }
+                }
+                // No child edge consumes the rest of the key: the focus value lives in
+                // `cur` itself (a value slot, not a child pointer). `cur` is already on
+                // the ancestor list, so stop here.
+                None => break,
             }
-            if self.focus_stack.depth() > 1 {
-                self.focus_stack.backtrack();
-            } else {
-                break;
+        }
+        // Recompute leaf -> root so each parent reads its children's already-updated agg_w.
+        for &ancestor in ancestors.iter().rev() {
+            let n = unsafe { &mut *ancestor };
+            n.make_mut().recompute_agg_w();
+        }
+        // The root value is stored on the zipper (`root_val`), not inside the root node,
+        // so `recompute_agg_w` above didn't account for it — fold it into the root node.
+        if let Some(root_ptr) = self.root_val {
+            if let Some(root_v) = unsafe { &*root_ptr } {
+                let root_agg = root_v.clone().into();
+                let root_node = unsafe { &mut *ancestors[0] };
+                let mut tagged = root_node.make_mut();
+                let cur = tagged.agg_w();
+                tagged.set_agg_w(cur + root_agg);
             }
         }
     }
@@ -2326,7 +2418,6 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
     pub(crate) fn mend_root(&mut self) {
         if self.key.prefix_idx.len() == 0 && self.key.origin_path.len() > 1 {
             debug_assert_eq!(self.focus_stack.depth(), 1);
-
             let root_prefix_path = &self.key.root_prefix_path();
             let node_key_start = self.key.node_key_start();
             if node_key_start < root_prefix_path.len() {
@@ -2343,23 +2434,16 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
 
     /// Internal method to perform the part of `descend_to` that moves the focus node
     pub(crate) fn descend_to_internal(&mut self) {
-
         let mut key_start = self.key.node_key_start();
-        //NOTE: this is a copy of the self.key.node_key() function, but we can't borrow the whole key structure in this code
         let mut key = if self.key.prefix_buf.len() > 0 {
             &self.key.prefix_buf
         } else {
             unsafe{ self.key.origin_path.as_slice_unchecked() }
         };
         key = &key[key_start..];
-        //Explanation: This 2 is based on the fact that a WriteZipper's focus_stack holds the parent node
-        // to the focus, so we must have a `node_key` unless the zipper is at the root, and the minimum
-        // `node_key` length is 1 byte
         if key.len() < 2 {
             return;
         }
-
-        //Step until we get to the end of the key or find a leaf node
         while Self::descend_step_internal(&mut self.focus_stack, &mut self.key.prefix_idx, &mut key, &mut key_start) { }
     }
 
@@ -5237,4 +5321,126 @@ mod tests {
         |btm: &mut PathMap<()>, path: &[u8]| -> WriteZipperOwned<()> {
             btm.clone().into_write_zipper(path)
     });
+
+    #[test]
+    fn agg_w_single_value() {
+        let mut map = PathMap::<u64>::new();
+        {
+            let mut z = map.write_zipper_at_path(b"key");
+            z.set_val_w(42);
+        }
+        assert_eq!(map.read_zipper_at_path(b"key").agg_w(), 42);
+    }
+
+    #[test]
+    fn agg_w_root_value() {
+        let mut map = PathMap::<u64>::new();
+        {
+            let mut z = map.write_zipper();
+            z.set_val_w(100);
+        }
+        assert_eq!(map.read_zipper().agg_w(), 100);
+    }
+
+    #[test]
+    fn agg_w_multiple_values() {
+        let mut map = PathMap::<u64>::new();
+        for &(path, val) in &[(&b"a"[..], 10), (&b"b"[..], 20), (&b"c"[..], 30)] {
+            let mut z = map.write_zipper_at_path(path);
+            z.set_val_w(val);
+        }
+        assert_eq!(map.read_zipper().agg_w(), 60);
+    }
+
+    #[test]
+    fn agg_w_nested() {
+        let mut map = PathMap::<u64>::new();
+        for &(path, val) in &[(&b"ax"[..], 5), (&b"ay"[..], 15), (&b"b"[..], 25)] {
+            let mut z = map.write_zipper_at_path(path);
+            z.set_val_w(val);
+        }
+        assert_eq!(map.read_zipper().agg_w(), 45);
+        assert_eq!(map.read_zipper_at_path(b"a").agg_w(), 20);
+    }
+
+    #[test]
+    fn agg_w_update() {
+        let mut map = PathMap::<u64>::new();
+        {
+            let mut z = map.write_zipper_at_path(b"k");
+            z.set_val_w(10);
+        }
+        {
+            let mut z = map.write_zipper_at_path(b"k");
+            z.set_val_w(99);
+        }
+        assert_eq!(map.read_zipper_at_path(b"k").agg_w(), 99);
+    }
+
+    #[test]
+    fn agg_w_remove() {
+        let mut map = PathMap::<u64>::new();
+        {
+            let mut z = map.write_zipper_at_path(b"k");
+            z.set_val_w(50);
+        }
+        {
+            let mut z = map.write_zipper_at_path(b"k");
+            z.remove_val_w(true);
+        }
+        assert_eq!(map.read_zipper().agg_w(), 0);
+    }
+
+    #[test]
+    fn agg_w_deep_tree() {
+        let mut map = PathMap::<u64>::new();
+        for &(path, val) in &[(&b"abc"[..], 7), (&b"abd"[..], 3), (&b"ax"[..], 10), (&b"y"[..], 20)] {
+            let mut z = map.write_zipper_at_path(path);
+            z.set_val_w(val);
+        }
+        assert_eq!(map.read_zipper().agg_w(), 40);
+        assert_eq!(map.read_zipper_at_path(b"a").agg_w(), 20);
+        assert_eq!(map.read_zipper_at_path(b"ab").agg_w(), 10);
+    }
+
+    #[test]
+    fn agg_w_write_preserves_focus() {
+        // A `_w` write must not disturb the zipper's focus — `propagate_agg_w` walks
+        // the trie by pointer and leaves `focus_stack`/`key` untouched, so navigation
+        // continues from where it left off (the persistent-cursor property). Reusing a
+        // single zipper across multiple writes is exactly what would break if the old
+        // stack-popping propagation were still in place.
+        let mut map = PathMap::<u64>::new();
+        let mut z = map.write_zipper();
+
+        z.descend_to(b"abc");
+        z.set_val_w(7);
+        // Focus must still be at "abc" after the write.
+        assert_eq!(z.path(), b"abc");
+        assert_eq!(z.val(), Some(&7));
+
+        // Continue navigating from the SAME zipper and write again.
+        z.reset();
+        z.descend_to(b"abd");
+        z.set_val_w(3);
+        assert_eq!(z.path(), b"abd");
+        assert_eq!(z.val(), Some(&3));
+
+        drop(z);
+        assert_eq!(map.read_zipper().agg_w(), 10);
+        assert_eq!(map.read_zipper_at_path(b"ab").agg_w(), 10);
+    }
+}
+
+#[test]
+fn debug_agg_w_simple() {
+    let mut map = PathMap::<u64>::new();
+    for &(path, val) in &[(&b"ax"[..], 5), (&b"ab"[..], 10)] {
+        let mut z = map.write_zipper_at_path(path);
+        z.set_val_w(val);
+    }
+    assert_eq!(map.read_zipper().agg_w(), 15);
+    assert_eq!(map.read_zipper_at_path(b"a").agg_w(), 15);
+    assert_eq!(map.read_zipper_at_path(b"ax").agg_w(), 5);
+    assert_eq!(map.read_zipper_at_path(b"ab").agg_w(), 10);
 }

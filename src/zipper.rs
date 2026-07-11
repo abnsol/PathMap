@@ -999,8 +999,9 @@ impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ReadZipperTra
         let core = ReadZipperCore::new_with_node_and_cloned_path_in(root_node, owned_root, path, root_prefix_len, root_key_start, root_val, alloc);
         Self { z: core, tracker }
     }
-    pub fn agg_w(&self) -> u64 {
-        self.borrow_raw_parts().0.agg_w()
+    /// See [ReadZipperCore::agg_w]
+    pub fn agg_w(&self) -> u64 where V: Into<u64> {
+        self.z.agg_w()
     }
 }
 
@@ -1111,6 +1112,10 @@ impl<'a, 'path, V: Clone + Send + Sync + Unpin + 'a, A: Allocator + 'a> ReadZipp
     /// Forked zippers never need to be tracked because they are always fully covered by their parent's permissions
     pub(crate) fn new_forked_with_inner_zipper(core: ReadZipperCore<'a, 'path, V, A>) -> Self {
         ReadZipperUntracked{ z: core }
+    }
+    /// See [ReadZipperCore::agg_w]
+    pub fn agg_w(&self) -> u64 where V: Into<u64> {
+        self.z.agg_w()
     }
 }
 
@@ -2305,6 +2310,24 @@ pub(crate) mod read_zipper_core {
                     // debug_assert!(self.root_node.is_borrowed());
                     self.root_val
                 }
+            }
+        }
+        /// Aggregate weight of the subtree at the zipper's focus.
+        /// Follows the same pattern as `get_val`: if key is non-empty, look up the child node.
+        pub(crate) fn agg_w(&self) -> u64 where V: Into<u64> {
+            let key = self.node_key();
+            if key.len() > 0 {
+                match self.focus_node.node_get_child(key) {
+                    Some((_consumed, child)) => {
+                        child.as_tagged().agg_w()
+                    },
+                    None => {
+                        self.focus_node.node_get_val(key)
+                            .map_or(0, |v| v.clone().into())
+                    }
+                }
+            } else {
+                self.focus_node.agg_w()
             }
         }
 
