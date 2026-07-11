@@ -5404,6 +5404,89 @@ mod tests {
     }
 
     #[test]
+    fn agg_w_exclusive_path_reaches_true_root() {
+        // The SWEEP writes through `write_zipper_at_exclusive_path` off a ZipperHead,
+        // which re-roots the write zipper AT the atom path. `set_val_w` then propagates
+        // agg_w only from that sub-root downward. The ancestors from the atom up to the
+        // TRUE trie root must still be updated (by `cleanup_write_zipper`), or
+        // `root_agg_w` goes stale after every sweep write.
+        //
+        // Uses the exact primitive the sweep uses: an owned zipper head. Seed a
+        // shared-prefix trie, write a new deep leaf via the EXCLUSIVE path, then reclaim
+        // the map and assert the root aggregate moved.
+        let mut map = PathMap::<u64>::new();
+        for &(path, val) in &[(&b"abc"[..], 7u64), (&b"abd"[..], 3)] {
+            let mut z = map.write_zipper_at_path(path);
+            z.set_val_w(val);
+        }
+        assert_eq!(map.read_zipper().agg_w(), 10, "baseline root agg_w");
+
+        let head = map.into_zipper_head([]);
+        {
+            let mut wz = head.write_zipper_at_exclusive_path(b"abe").unwrap();
+            wz.set_val_w(5);
+            head.cleanup_write_zipper_w(wz);
+        }
+        let map = head.into_map();
+
+        // True root must include the exclusive-path write.
+        assert_eq!(map.read_zipper().agg_w(), 15,
+            "root agg_w must include exclusive-path write (7+3+5)");
+        // Intermediate ancestor above the write must also be current.
+        assert_eq!(map.read_zipper_at_path(b"ab").agg_w(), 15,
+            "ancestor 'ab' agg_w must include exclusive-path write");
+        // The written leaf itself.
+        assert_eq!(map.read_zipper_at_path(b"abe").agg_w(), 5);
+    }
+
+    #[test]
+    fn agg_w_concurrent_disjoint_writers() {
+        // The real sweep runs MANY threads writing disjoint leaves that share ancestors,
+        // each via its own exclusive-path zipper off a shared `Arc<ZipperHeadOwned>`.
+        // `propagate_agg_w` + `cleanup_write_zipper` walk raw node pointers up the SHARED
+        // ancestor chain — the exact place a data race would live. After all writers
+        // finish, every node's stored agg_w must equal the ground-truth sum.
+        use std::sync::Arc;
+
+        const N: u64 = 64;
+        let mut map = PathMap::<u64>::new();
+        // Pre-create the shared prefix so exclusive paths don't all race to build it.
+        {
+            let mut z = map.write_zipper_at_path(b"k\x00");
+            z.set_val_w(0);
+        }
+
+        let head = Arc::new(map.into_zipper_head([]));
+        std::thread::scope(|s| {
+            for i in 0..N {
+                let head = Arc::clone(&head);
+                s.spawn(move || {
+                    // Disjoint leaf per thread: "k" + one distinct byte. All share "k".
+                    let path = [b'k', 1 + i as u8];
+                    let mut wz = head.write_zipper_at_exclusive_path(&path[..]).unwrap();
+                    wz.set_val_w(i + 1); // weights 1..=N
+                    head.cleanup_write_zipper_w(wz);
+                });
+            }
+        });
+        let map = Arc::try_unwrap(head).ok().expect("all writers done").into_map();
+
+        // Ground truth: the seed (0) plus sum 1..=N.
+        let expected: u64 = (0..N).map(|i| i + 1).sum();
+        assert_eq!(map.read_zipper_at_path(b"k").agg_w(), expected,
+            "shared-ancestor 'k' agg_w must equal sum of all concurrent writes");
+        assert_eq!(map.read_zipper().agg_w(), expected,
+            "root agg_w must equal sum of all concurrent writes");
+
+        // Cross-check per-leaf ground truth.
+        for i in 0..N {
+            let path = [b'k', 1 + i as u8];
+            assert_eq!(map.read_zipper_at_path(&path[..]).agg_w(), i + 1,
+                "leaf agg_w wrong at {:?}", path);
+        }
+    }
+
+    #[test]
     fn agg_w_write_preserves_focus() {
         // A `_w` write must not disturb the zipper's focus — `propagate_agg_w` walks
         // the trie by pointer and leaves `focus_stack`/`key` untouched, so navigation

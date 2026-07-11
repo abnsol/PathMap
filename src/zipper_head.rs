@@ -81,6 +81,18 @@ pub trait ZipperCreation<'trie, V: Clone + Send + Sync, A: Allocator = GlobalAll
     ///
     /// May panic if `zipper` did not originate from the `self` `ZipperHead`.
     fn cleanup_write_zipper<Z: ZipperWriting<V, A> + ZipperAbsolutePath>(&self, z: Z);
+
+    /// Like [cleanup_write_zipper](ZipperCreation::cleanup_write_zipper), but additionally
+    /// propagates aggregate weight (`agg_w`) from the head root down to the reclaimed
+    /// zipper's sub-root.
+    ///
+    /// An exclusive-path write zipper is rooted AT the sampled path, so its `set_val_w`
+    /// only updates `agg_w` from that sub-root downward. This method closes the gap: after
+    /// the sub-zipper's changes rejoin the trie, it recomputes every ancestor from the true
+    /// root down so `agg_w` (and hence a root-level read) stays exact.
+    ///
+    /// Input: the write zipper to reclaim (must originate from `self`). No return.
+    fn cleanup_write_zipper_w<Z: ZipperWriting<V, A> + ZipperAbsolutePath>(&self, z: Z) where V: Into<u64>;
 }
 
 trait ZipperCreationPriv<'trie, V, A: Allocator> {
@@ -309,6 +321,25 @@ impl<'trie, Z, V: 'trie + Clone + Send + Sync + Unpin, A: Allocator + 'trie> Zip
                 inner_z.move_to_path(origin_path);
                 if inner_z.try_borrow_focus().unwrap().0.as_tagged().node_is_empty() {
                     inner_z.prune_path();
+                }
+                inner_z.reset();
+            }
+        })
+    }
+    fn cleanup_write_zipper_w<ChildZ: ZipperWriting<V, A> + ZipperAbsolutePath>(&self, mut z: ChildZ) where V: Into<u64> {
+        let origin_path = z.take_root_prefix_path();
+        drop(z);
+        self.with_inner_core_z(|inner_z| {
+            if inner_z.focus_stack.top().is_some() {
+                let saved = inner_z.focus_stack.root_mut()
+                    .map(|r| r as *mut TrieNodeODRc<V, A>);
+                let saved_key_start = inner_z.key.root_key_start;
+                inner_z.move_to_path(origin_path);
+                if inner_z.try_borrow_focus().unwrap().0.as_tagged().node_is_empty() {
+                    inner_z.prune_path();
+                }
+                if let Some(ptr) = saved {
+                    inner_z.propagate_agg_w(ptr, saved_key_start);
                 }
                 inner_z.reset();
             }
