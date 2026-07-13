@@ -1464,18 +1464,15 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
         let mut ancestors: Vec<*mut TrieNodeODRc<V, A>> = Vec::new();
         let mut cur = saved_root_ptr;
         let mut remaining = path;
-        loop {
-            ancestors.push(cur);
+        ancestors.push(cur);
+        while remaining.len() > 0 {
             let cur_ref = unsafe { &mut *cur };
             match cur_ref.make_mut().node_into_child_mut(remaining) {
                 Some((consumed, child)) => {
                     remaining = &remaining[consumed..];
                     cur = child as *mut TrieNodeODRc<V, A>;
-                    if remaining.len() == 0 { break; }
+                    ancestors.push(cur);
                 }
-                // No child edge consumes the rest of the key: the focus value lives in
-                // `cur` itself (a value slot, not a child pointer). `cur` is already on
-                // the ancestor list, so stop here.
                 None => break,
             }
         }
