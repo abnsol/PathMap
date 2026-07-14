@@ -1473,6 +1473,15 @@ where Storage: AsRef<[u8]>
     fn alloc(&self) -> GlobalAlloc { global_alloc() }
 }
 
+impl<'tree, Storage> ZipperSubtries<u64, GlobalAlloc> for ACTZipper<'tree, Storage, u64>
+where Storage: AsRef<[u8]>
+{
+    fn native_subtries(&self) -> bool { false }
+    fn try_make_map(&self) -> Option<PathMap<u64, GlobalAlloc>> { None }
+    fn trie_ref(&self) -> Option<TrieRef<'_, u64, GlobalAlloc>> { None }
+    fn alloc(&self) -> GlobalAlloc { global_alloc() }
+}
+
 const DO_TRACE: bool = false;
 impl<'tree, Storage, Value> ACTZipper<'tree, Storage, Value>
 where Storage: AsRef<[u8]>
