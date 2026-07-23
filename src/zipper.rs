@@ -2313,7 +2313,11 @@ pub(crate) mod read_zipper_core {
             }
         }
         /// Aggregate weight of the subtree at the zipper's focus.
-        /// Follows the same pattern as `get_val`: if key is non-empty, look up the child node.
+        ///
+        /// If the key is non-empty, we attempt to look up the exact matching child node.
+        /// If the exact match fails (e.g. because we are midway through traversing a
+        /// compressed path segment), we fall back to querying the focus node for the
+        /// aggregate weight of any child slot matching the prefix key.
         pub(crate) fn agg_w(&self) -> u64 where V: Into<u64> {
             let key = self.node_key();
             if key.len() > 0 {
@@ -2322,8 +2326,12 @@ pub(crate) mod read_zipper_core {
                         child.as_tagged().agg_w()
                     },
                     None => {
-                        self.focus_node.node_get_val(key)
-                            .map_or(0, |v| v.clone().into())
+                        if let Some(w) = self.focus_node.agg_w_for_prefix(key) {
+                            w
+                        } else {
+                            self.focus_node.node_get_val(key)
+                                .map_or(0, |v| v.clone().into())
+                        }
                     }
                 }
             } else {

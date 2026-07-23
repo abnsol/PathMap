@@ -2727,6 +2727,44 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
 }
 
 impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
+    /// Resolves the aggregate weight of the child branch matching a partial path prefix.
+    ///
+    /// This is used during byte-by-byte traversal (e.g. random walks) when the zipper
+    /// has not yet fully consumed a compressed path key segment (meaning `key` is a prefix 
+    /// of a slot's compressed key, but not long enough to reach the child node).
+    /// If `key` matches a prefix of a slot's key, the slot's child weight (or value weight) 
+    /// is returned.
+    pub fn agg_w_for_prefix(&self, key: &[u8]) -> Option<u64> where V: Into<u64> {
+        let mut total = 0;
+        let mut matched = false;
+        if self.is_used::<0>() {
+            let node_key_0 = unsafe{ self.key_unchecked::<0>() };
+            if node_key_0.starts_with(key) {
+                if self.is_child_ptr::<0>() {
+                    total += unsafe { self.child_in_slot::<0>() }.as_tagged().agg_w();
+                } else {
+                    total += unsafe { self.val_in_slot::<0>() }.clone().into();
+                }
+                matched = true;
+            }
+        }
+        if self.is_used::<1>() {
+            let node_key_1 = unsafe{ self.key_unchecked::<1>() };
+            if node_key_1.starts_with(key) {
+                if self.is_child_ptr::<1>() {
+                    total += unsafe { self.child_in_slot::<1>() }.as_tagged().agg_w();
+                } else {
+                    total += unsafe { self.val_in_slot::<1>() }.clone().into();
+                }
+                matched = true;
+            }
+        }
+        if matched {
+            Some(total)
+        } else {
+            None
+        }
+    }
     /// Part of the implementation of methods the remove subtries from a node
     fn remove_subtries(&mut self, remove_0: bool, remove_1: bool, key0_starts_with: bool, prune: bool, key_len: usize) {
         //NOTE: the order here is important because removing slot_0 first might shift the

@@ -870,6 +870,16 @@ mod tagged_node_ref {
                 Self::EmptyNode => 0,
             }
         }
+        /// Resolves the aggregate weight of a partial path prefix.
+        ///
+        /// Delegates to node implementations (such as `LineListNode`) to fetch the weight 
+        /// of a branch when the key matches a prefix of a compressed key segment.
+        pub fn agg_w_for_prefix(&self, key: &[u8]) -> Option<u64> where V: Into<u64> {
+            match self {
+                Self::LineListNode(node) => node.agg_w_for_prefix(key),
+                _ => None,
+            }
+        }
         #[cfg(feature = "slim_ptrs")]
         #[inline]
         pub(super) fn from_slim_ptr(ptr: super::slim_node_ptr::SlimNodePtr<V, A>) -> Self {

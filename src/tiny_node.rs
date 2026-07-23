@@ -314,7 +314,17 @@ impl<'a, V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for TinyRefNode<'a
         TrieNodeODRc::new_in(self.clone(), self.alloc.clone())
     }
     fn agg_w(&self) -> u64 {
-        0
+        if self.is_child_ptr() {
+            unsafe { &*self.payload.child }.as_tagged().agg_w()
+        } else {
+            if std::mem::size_of::<V>() == 8 {
+                let val_ref: &V = unsafe { &**self.payload.val };
+                let val_u64: &u64 = unsafe { &*(val_ref as *const V as *const u64) };
+                *val_u64
+            } else {
+                0
+            }
+        }
     }
     fn set_agg_w(&mut self, _val: u64) {}
     fn recompute_agg_w(&mut self) where V: Into<u64> {}
