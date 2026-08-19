@@ -44,8 +44,15 @@ pub trait ZipperCreation<'trie, V: Clone + Send + Sync, A: Allocator = GlobalAll
     // /// read-zipper creation methods such as [read_zipper_at_path](ZipperCreation::read_zipper_at_path).
     // fn owned_read_zipper_at_path<K: AsRef<[u8]>>(&self, path: K) -> Result<ReadZipperOwned<V>, Conflict>;
 
-    /// Creates a new [write zippers](ZipperWriting) with the specified path from the `ZipperHead`
+    /// Creates a new [write zipper](ZipperWriting) with the specified path from the `ZipperHead`.
     fn write_zipper_at_exclusive_path<'a, K: AsRef<[u8]>>(&'a self, path: K) -> Result<WriteZipperTracked<'a, 'static, V, A>, Conflict> where 'trie: 'a;
+
+    /// Creates the single weighted writer at this head's root. If creating the
+    /// exclusive root upgrades nodes, aggregate metadata is preserved.
+    fn write_zipper_at_exclusive_root_w<'a>(&'a self) -> Result<WriteZipperTracked<'a, 'static, V, A>, Conflict>
+    where
+        V: Into<u64>,
+        'trie: 'a;
 
     /// Creates a new [write zippers](ZipperWriting) with the specified path from the `ZipperHead`, where the
     /// caller guarantees that no existing zippers may access the specified path at any time before the
@@ -292,6 +299,30 @@ impl<'trie, Z, V: 'trie + Clone + Send + Sync + Unpin, A: Allocator + 'trie> Zip
             Ok(WriteZipperTracked::new_with_node_and_cloned_path_internal_in(zipper_root_node, Some(zipper_root_val), path, path.len(), z.alloc.clone(), Some(zipper_tracker)))
         })
     }
+    fn write_zipper_at_exclusive_root_w<'a>(&'a self) -> Result<WriteZipperTracked<'a, 'static, V, A>, Conflict>
+    where
+        V: Into<u64>,
+        'trie: 'a,
+    {
+        let path: &[u8] = &[];
+        let tracker = ZipperTracker::<TrackingWrite>::new(self.tracker_paths().clone(), path)?;
+        self.with_inner_core_z(|z| {
+            if let Some(node) = z.try_borrow_focus_mut() {
+                node.make_unique();
+            }
+            debug_assert_eq!(z.key.node_key_start(), z.key.prefix_buf.len());
+            debug_assert_eq!(z.focus_stack.depth(), 1);
+            z.focus_stack.to_root();
+            let root_node = z.focus_stack.root_mut().unwrap();
+            make_cell_node_w(root_node);
+            let root_val = z.root_val.as_mut().unwrap();
+            let root_node: &'trie mut TrieNodeODRc<V, A> = unsafe { &mut *(root_node as *mut _) };
+            let root_val: &'trie mut Option<V> = unsafe { &mut **root_val };
+            Ok(WriteZipperTracked::new_with_node_and_cloned_path_internal_in(
+                root_node, Some(root_val), path, 0, z.alloc.clone(), Some(tracker),
+            ))
+        })
+    }
     unsafe fn write_zipper_at_exclusive_path_unchecked<'a, K: AsRef<[u8]>>(&'a self, path: K) -> WriteZipperTracked<'a, 'static, V, A> where 'trie: 'a {
         let path = path.as_ref();
         self.with_inner_core_z(|z| {
@@ -331,8 +362,7 @@ impl<'trie, Z, V: 'trie + Clone + Send + Sync + Unpin, A: Allocator + 'trie> Zip
         drop(z);
         self.with_inner_core_z(|inner_z| {
             if inner_z.focus_stack.top().is_some() {
-                let saved = inner_z.focus_stack.root_mut()
-                    .map(|r| r as *mut TrieNodeODRc<V, A>);
+                let saved = inner_z.focus_stack.root_ptr();
                 let saved_key_start = inner_z.key.root_key_start;
                 inner_z.move_to_path(origin_path);
                 if inner_z.try_borrow_focus().unwrap().0.as_tagged().node_is_empty() {

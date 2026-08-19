@@ -375,6 +375,18 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> PathMap<V, A> {
         zipper.remove_val(prune)
     }
 
+    /// Removes a value while preserving aggregate caches. Descending from the
+    /// map root allows full-path pruning; the value is first changed to the
+    /// default zero contribution while every ancestor is still navigable.
+    pub fn remove_val_at_w<K: AsRef<[u8]>>(&mut self, path: K, prune: bool) -> Option<V>
+    where
+        V: Into<u64> + Default,
+    {
+        let mut zipper = self.write_zipper();
+        zipper.descend_to(path);
+        zipper.remove_val_w(prune)
+    }
+
     /// Alias for [Self::remove_val_at], so `PathMap` "feels" like other Rust collections
     pub fn remove<K: AsRef<[u8]>>(&mut self, path: K) -> Option<V> {
         self.remove_val_at(path, true)

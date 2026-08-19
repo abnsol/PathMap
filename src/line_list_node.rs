@@ -12,6 +12,17 @@ use crate::ring::*;
 use crate::dense_byte_node::{DenseByteNode, ByteNode, CoFree, OrdinaryCoFree, CellCoFree};
 use crate::tiny_node::TinyRefNode;
 
+#[inline]
+fn extract_val_weight<V>(val: &V) -> u64 {
+    if core::mem::size_of::<V>() == 8 {
+        unsafe { *(val as *const V as *const u64) }
+    } else if core::mem::size_of::<V>() == 4 {
+        unsafe { *(val as *const V as *const u32) as u64 }
+    } else {
+        0
+    }
+}
+
 /// A LineListNode stores up to 2 children in a single cache line
 #[repr(C)]
 pub struct LineListNode<V: Clone + Send + Sync, A: Allocator> {
@@ -577,18 +588,27 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
     }
     /// Splits the key in slot_0 at `idx` (exclusive.  ie. the length of the key)
     fn split_0(&mut self, idx: usize) where V: Clone {
+        let is_child_0 = self.is_child_ptr::<0>();
+        let is_used_1 = self.is_used::<1>();
+
         let mut self_payload = ValOrChildUnion{ _unused: () };
         core::mem::swap(&mut self_payload, &mut self.val_or_child0);
         let node_key_0 = unsafe{ self.key_unchecked::<0>() };
 
         let mut child_node = Self::new_in(self.alloc.clone());
-        unsafe{ child_node.set_payload_0(&node_key_0[idx..], self.is_child_ptr::<0>(), self_payload); }
+        unsafe{ child_node.set_payload_0(&node_key_0[idx..], is_child_0, self_payload); }
+        if is_child_0 {
+            child_node.agg_w = unsafe { child_node.child_in_slot::<0>() }.as_tagged().agg_w();
+        } else {
+            let v = unsafe { child_node.val_in_slot::<0>() };
+            child_node.agg_w = extract_val_weight(v);
+        }
 
         //Convert slot_0 to a child ptr
         self.val_or_child0 = ValOrChildUnion{ child: ManuallyDrop::new(TrieNodeODRc::new_in(child_node, self.alloc.clone())) };
 
         //Shift the key for slot_1, if there is one
-        let slot_mask_1 = if self.is_used::<1>() {
+        let slot_mask_1 = if is_used_1 {
             let key_len_1 = self.key_len_1();
             unsafe {
                 let base_ptr = self.key_bytes.as_mut_ptr().cast::<u8>();
@@ -606,14 +626,22 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
     }
     /// Splits the key in slot_0 at `idx` (exclusive.  ie. the length of the key)
     fn split_1(&mut self, idx: usize) where V: Clone {
+        let is_child_1 = self.is_child_ptr::<1>();
+
         let mut self_payload = ValOrChildUnion{ _unused: () };
         core::mem::swap(&mut self_payload, &mut self.val_or_child1);
         let node_key_1 = unsafe{ self.key_unchecked::<1>() };
 
         let mut child_node = Self::new_in(self.alloc.clone());
-        unsafe{ child_node.set_payload_0(&node_key_1[idx..], self.is_child_ptr::<1>(), self_payload); }
+        unsafe{ child_node.set_payload_0(&node_key_1[idx..], is_child_1, self_payload); }
+        if is_child_1 {
+            child_node.agg_w = unsafe { child_node.child_in_slot::<0>() }.as_tagged().agg_w();
+        } else {
+            let v = unsafe { child_node.val_in_slot::<0>() };
+            child_node.agg_w = extract_val_weight(v);
+        }
 
-        //Convert slot_0 from to a child ptr
+        //Convert slot_1 to a child ptr
         self.val_or_child1 = ValOrChildUnion{ child: ManuallyDrop::new(TrieNodeODRc::new_in(child_node, self.alloc.clone())) };
 
         //Re-adjust the length and flags
@@ -1075,13 +1103,42 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
         }
     }
 
+    /// Weighted conversion preserves the aggregate on intermediate nodes introduced
+    /// for multi-byte keys before recomputing the replacement node itself.
+    pub(crate) fn convert_to_dense_w<Cf: CoFree<V=V, A=A>>(&mut self, capacity: usize) -> TrieNodeODRc<V, A>
+        where ByteNode<Cf, A>: TrieNodeDowncast<V, A>, V: Into<u64>
+    {
+        let slot_0 = if self.is_used::<0>() {
+            let key = unsafe { self.key_unchecked::<0>() };
+            (key.len() > 1).then(|| (key[0], self.agg_w_for_prefix(key).unwrap()))
+        } else { None };
+        let slot_1 = if self.is_used::<1>() {
+            let key = unsafe { self.key_unchecked::<1>() };
+            (key.len() > 1).then(|| (key[0], self.agg_w_for_prefix(key).unwrap()))
+        } else { None };
+
+        let mut replacement = self.convert_to_dense::<Cf>(capacity);
+        {
+            let mut node = replacement.make_mut();
+            for (key, weight) in slot_0.into_iter().chain(slot_1) {
+                let (_, child) = node.node_get_child_mut(&[key]).expect("converted long key must have an intermediate child");
+                child.make_mut().set_agg_w(weight);
+            }
+            node.recompute_agg_w();
+        }
+        replacement
+    }
+
     /// Converts the node to a ByteNode, transplanting the contents and leaving `self` empty
     pub(crate) fn convert_to_dense<Cf: CoFree<V=V, A=A>>(&mut self, capacity: usize) -> TrieNodeODRc<V, A>
         where ByteNode<Cf, A>: TrieNodeDowncast<V, A>
     {
         let mut replacement_node = ByteNode::<Cf, A>::with_capacity_in(capacity, self.alloc.clone());
 
-        //1. Transplant the key / value from slot_1 to the new node
+        let is_child_0 = self.is_child_ptr::<0>();
+        let is_child_1 = self.is_child_ptr::<1>();
+
+        //1. Transplant the key / value from slot_0 to the new node
         if self.is_used::<0>() {
             let mut slot_0_payload = ValOrChildUnion{ _unused: () };
             core::mem::swap(&mut slot_0_payload, &mut self.val_or_child0);
@@ -1090,10 +1147,16 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
             // make an intermediate node to hold the rest of the key
             if key_0.len() > 1 {
                 let mut child_node = Self::new_in(self.alloc.clone());
-                unsafe{ child_node.set_payload_0(&key_0[1..], self.is_child_ptr::<0>(), slot_0_payload); }
+                unsafe{ child_node.set_payload_0(&key_0[1..], is_child_0, slot_0_payload); }
+                if is_child_0 {
+                    child_node.agg_w = unsafe { child_node.child_in_slot::<0>() }.as_tagged().agg_w();
+                } else {
+                    let v = unsafe { child_node.val_in_slot::<0>() };
+                    child_node.agg_w = extract_val_weight(v);
+                }
                 replacement_node.set_child(key_0[0], TrieNodeODRc::new_in(child_node, self.alloc.clone()));
             } else {
-                if self.is_child_ptr::<0>() {
+                if is_child_0 {
                     let child_node = unsafe{ ManuallyDrop::into_inner(slot_0_payload.child) };
                     replacement_node.set_child(key_0[0], child_node);
                 } else {
@@ -1110,10 +1173,16 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
             let key_1 = unsafe{ self.key_unchecked::<1>() };
             if key_1.len() > 1 {
                 let mut child_node = Self::new_in(self.alloc.clone());
-                unsafe{ child_node.set_payload_0(&key_1[1..], self.is_child_ptr::<1>(), slot_1_payload); }
+                unsafe{ child_node.set_payload_0(&key_1[1..], is_child_1, slot_1_payload); }
+                if is_child_1 {
+                    child_node.agg_w = unsafe { child_node.child_in_slot::<0>() }.as_tagged().agg_w();
+                } else {
+                    let v = unsafe { child_node.val_in_slot::<0>() };
+                    child_node.agg_w = extract_val_weight(v);
+                }
                 replacement_node.set_child(key_1[0], TrieNodeODRc::new_in(child_node, self.alloc.clone()));
             } else {
-                if self.is_child_ptr::<1>() {
+                if is_child_1 {
                     let child_node = unsafe{ ManuallyDrop::into_inner(slot_1_payload.child) };
                     replacement_node.set_child(key_1[0], child_node);
                 } else {
@@ -1125,6 +1194,8 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
 
         //4. Clear self.header, so we don't double-free anything when this old node gets dropped
         self.header = 0;
+
+        replacement_node.agg_w = self.agg_w;
 
         TrieNodeODRc::new_in(replacement_node, self.alloc.clone())
     }
@@ -2805,6 +2876,12 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNodeDowncast<V, A> for LineListNo
     }
     fn convert_to_cell_node(&mut self) -> TrieNodeODRc<V, A> {
         self.convert_to_dense::<CellCoFree<V, A>>(3)
+    }
+    fn convert_to_cell_node_w(&mut self) -> TrieNodeODRc<V, A>
+    where
+        V: Into<u64>,
+    {
+        self.convert_to_dense_w::<CellCoFree<V, A>>(3)
     }
 }
 

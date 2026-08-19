@@ -507,26 +507,26 @@ impl<'a, 'path, V: Clone + Send + Sync + Unpin + Into<u64>, A: Allocator + 'a> W
     pub fn set_val_w(&mut self, val: V) -> Option<V> {
         // Capture the root node + its key-start BEFORE the write, since `set_val`'s
         // `mend_root` may replace `focus_stack.root` with a deeper node.
-        let saved = self.z.focus_stack.root_mut()
-            .map(|r| r as *mut TrieNodeODRc<V, A>);
-        let saved_key_start = self.z.key.root_key_start;
+        let saved = Some(self.z.agg_root_ptr);
+        let saved_key_start = self.z.agg_root_key_start;
         let result = self.z.set_val(val);
         if let Some(ptr) = saved {
             self.z.propagate_agg_w(ptr, saved_key_start);
         }
         result
     }
-    /// Remove value at the zipper's current position, then propagate aggregate weight changes.
-    pub fn remove_val_w(&mut self, prune: bool) -> Option<V> {
-        // Capture the root node BEFORE the write, consistent with set_val_w.
-        let saved = self.z.focus_stack.root_mut()
-            .map(|r| r as *mut TrieNodeODRc<V, A>);
-        let saved_key_start = self.z.key.root_key_start;
-        let result = self.z.remove_val(prune);
-        if let Some(ptr) = saved {
-            self.z.propagate_agg_w(ptr, saved_key_start);
+    /// Remove a value while preserving aggregate caches.
+    pub fn remove_val_w(&mut self, prune: bool) -> Option<V> where V: Default {
+        if self.val().is_none() {
+            return None;
         }
-        result
+        // Propagate zero while the complete path is still navigable. Pruning may
+        // restructure the trie afterward, but it removes only zero contribution.
+        let previous = self.set_val_w(V::default());
+        if previous.is_some() {
+            self.z.remove_val(prune);
+        }
+        previous
     }
 }
 
@@ -702,26 +702,26 @@ impl<'a, 'path, V: Clone + Send + Sync + Unpin + Into<u64>, A: Allocator + 'a> W
     pub fn set_val_w(&mut self, val: V) -> Option<V> {
         // Capture the root node + its key-start BEFORE the write, since `set_val`'s
         // `mend_root` may replace `focus_stack.root` with a deeper node.
-        let saved = self.z.focus_stack.root_mut()
-            .map(|r| r as *mut TrieNodeODRc<V, A>);
-        let saved_key_start = self.z.key.root_key_start;
+        let saved = Some(self.z.agg_root_ptr);
+        let saved_key_start = self.z.agg_root_key_start;
         let result = self.z.set_val(val);
         if let Some(ptr) = saved {
             self.z.propagate_agg_w(ptr, saved_key_start);
         }
         result
     }
-    /// Remove value at the zipper's current position, then propagate aggregate weight changes.
-    pub fn remove_val_w(&mut self, prune: bool) -> Option<V> {
-        // Capture the root node BEFORE the write, consistent with set_val_w.
-        let saved = self.z.focus_stack.root_mut()
-            .map(|r| r as *mut TrieNodeODRc<V, A>);
-        let saved_key_start = self.z.key.root_key_start;
-        let result = self.z.remove_val(prune);
-        if let Some(ptr) = saved {
-            self.z.propagate_agg_w(ptr, saved_key_start);
+    /// Remove a value while preserving aggregate caches.
+    pub fn remove_val_w(&mut self, prune: bool) -> Option<V> where V: Default {
+        if self.val().is_none() {
+            return None;
         }
-        result
+        // Propagate zero while the complete path is still navigable. Pruning may
+        // restructure the trie afterward, but it removes only zero contribution.
+        let previous = self.set_val_w(V::default());
+        if previous.is_some() {
+            self.z.remove_val(prune);
+        }
+        previous
     }
 }
 
@@ -918,6 +918,8 @@ pub(crate) struct WriteZipperCore<'a, 'k, V: Clone + Send + Sync, A: Allocator> 
     pub(crate) key: KeyFields<'k>,
 
     pub(crate) root_val: Option<*mut Option<V>>,
+    pub(crate) agg_root_ptr: *mut TrieNodeODRc<V, A>,
+    pub(crate) agg_root_key_start: usize,
 
     /// The stack of node references.  We need a "rooted" Vec in case we need to upgrade the node at the root of the zipper
     pub(crate) focus_stack: MutNodeStack<'a, V, A>,
@@ -1147,18 +1149,25 @@ impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperPathBuf
 
 impl <'a, V: Clone + Send + Sync + Unpin, A: Allocator> WriteZipperCore<'a, 'static, V, A> {
     pub(crate) fn new_with_node_and_cloned_path_in(root_node: &'a mut TrieNodeODRc<V, A>, root_val: Option<&'a mut Option<V>>, path: &[u8], root_prefix_len: usize, root_key_start: usize, alloc: A) -> Self {
+        let agg_root_ptr = root_node as *mut TrieNodeODRc<V, A>;
         let (key, node) = node_along_path_mut(root_node, &path[root_key_start..], true);
 
         let new_root_key_start = root_prefix_len - key.len();
-        Self::new_with_node_and_cloned_path_internal_in(node, root_val, path, new_root_key_start, alloc)
+        let mut result = Self::new_with_node_and_cloned_path_internal_in(node, root_val, path, new_root_key_start, alloc);
+        result.agg_root_ptr = agg_root_ptr;
+        result.agg_root_key_start = root_key_start;
+        result
     }
     /// See [WriteZipperUntracked::new_with_node_and_path_internal]
     pub(crate) fn new_with_node_and_cloned_path_internal_in(root_node: &'a mut TrieNodeODRc<V, A>, root_val: Option<&'a mut Option<V>>, path: &[u8], root_key_start: usize, alloc: A) -> Self {
+        let agg_root_ptr = root_node as *mut TrieNodeODRc<V, A>;
         let focus_stack = MutNodeStack::new(root_node);
         debug_assert!((path.len()-root_key_start == 0) != (root_val.is_none())); //We must have either a node_path or a root_val, but never both
         Self {
             key: KeyFields::new_cloned_path(path, root_key_start),
             root_val: root_val.map(|val| val as *mut Option<V>),
+            agg_root_ptr,
+            agg_root_key_start: root_key_start,
             focus_stack,
             alloc,
         }
@@ -1168,18 +1177,25 @@ impl <'a, V: Clone + Send + Sync + Unpin, A: Allocator> WriteZipperCore<'a, 'sta
 impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperCore<'a, 'path, V, A> {
     /// Creates a new zipper, with a path relative to a node
     pub(crate) fn new_with_node_and_path_in(root_node: &'a mut TrieNodeODRc<V, A>, root_val: Option<&'a mut Option<V>>, path: &'path [u8], root_prefix_len: usize, root_key_start: usize, alloc: A) -> Self {
+        let agg_root_ptr = root_node as *mut TrieNodeODRc<V, A>;
         let (key, node) = node_along_path_mut(root_node, &path[root_key_start..], true);
 
         let new_root_key_start = root_prefix_len - key.len();
-        Self::new_with_node_and_path_internal_in(node, root_val, path, new_root_key_start, alloc)
+        let mut result = Self::new_with_node_and_path_internal_in(node, root_val, path, new_root_key_start, alloc);
+        result.agg_root_ptr = agg_root_ptr;
+        result.agg_root_key_start = root_key_start;
+        result
     }
     /// See [WriteZipperUntracked::new_with_node_and_path_internal]
     pub(crate) fn new_with_node_and_path_internal_in(root_node: &'a mut TrieNodeODRc<V, A>, root_val: Option<&'a mut Option<V>>, path: &'path [u8], root_key_start: usize, alloc: A) -> Self {
+        let agg_root_ptr = root_node as *mut TrieNodeODRc<V, A>;
         let focus_stack = MutNodeStack::new(root_node);
         debug_assert!((path.len()-root_key_start == 0) != (root_val.is_none())); //We must have either a node_path or a root_val, but never both
         Self {
             key: KeyFields::new(path, root_key_start),
             root_val: root_val.map(|val| val as *mut Option<V>),
+            agg_root_ptr,
+            agg_root_key_start: root_key_start,
             focus_stack,
             alloc,
         }
@@ -1467,7 +1483,7 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
         ancestors.push(cur);
         while remaining.len() > 0 {
             let cur_ref = unsafe { &mut *cur };
-            match cur_ref.make_mut().node_into_child_mut(remaining) {
+            match cur_ref.make_mut().node_get_child_mut(remaining) {
                 Some((consumed, child)) => {
                     remaining = &remaining[consumed..];
                     cur = child as *mut TrieNodeODRc<V, A>;
@@ -2722,6 +2738,11 @@ mod mut_node_stack {
             } else {
                 None
             }
+        }
+        /// Returns the stable root ODRc address without moving or clearing the stack.
+        /// Weighted propagation needs this even after the cursor has descended.
+        pub fn root_ptr(&self) -> Option<*mut TrieNodeODRc<V, A>> {
+            self.root.map(|root| root.as_ptr())
         }
         #[inline]
         pub unsafe fn root_unchecked(&self) -> &TrieNodeODRc<V, A> {
@@ -5437,6 +5458,37 @@ mod tests {
     }
 
     #[test]
+    fn agg_w_pruned_remove_preserves_sibling() {
+        let mut map = PathMap::<u64>::new();
+        map.write_zipper_at_path(b"common-seed").set_val_w(1);
+        map.write_zipper_at_path(b"rule").set_val_w(40);
+
+        assert_eq!(map.remove_val_at_w(b"rule", true), Some(40));
+        assert_eq!(map.read_zipper().agg_w(), 1);
+        assert_eq!(map.read_zipper_at_path(b"common-seed").val(), Some(&1));
+        assert_eq!(map.read_zipper_at_path(b"rule").val(), None);
+    }
+
+    #[test]
+    fn agg_w_root_scoped_exclusive_writer() {
+        let mut map = PathMap::<u64>::new();
+        map.write_zipper_at_path(b"common-seed").set_val_w(1);
+
+        let head = map.into_zipper_head([]);
+        let mut wz = head.write_zipper_at_exclusive_root_w().unwrap();
+        wz.move_to_path(b"common-added");
+        wz.set_val_w(1);
+        wz.reset();
+        assert_eq!(wz.fork_read_zipper().agg_w(), 2, "child zipper aggregate before cleanup");
+        head.cleanup_write_zipper_w(wz);
+        let map = head.into_map();
+
+        assert_eq!(map.read_zipper().agg_w(), 2);
+        assert_eq!(map.read_zipper_at_path(b"common-seed").val(), Some(&1));
+        assert_eq!(map.read_zipper_at_path(b"common-added").val(), Some(&1));
+    }
+
+    #[test]
     fn agg_w_concurrent_disjoint_writers() {
         // The real sweep runs MANY threads writing disjoint leaves that share ancestors,
         // each via its own exclusive-path zipper off a shared `Arc<ZipperHeadOwned>`.
@@ -5509,6 +5561,24 @@ mod tests {
         drop(z);
         assert_eq!(map.read_zipper().agg_w(), 10);
         assert_eq!(map.read_zipper_at_path(b"ab").agg_w(), 10);
+    }
+}
+
+#[test]
+fn agg_w_mixed_encoded_symbol_lengths() {
+    let mut map = PathMap::<u64>::new();
+    let paths: [(Vec<u8>, u64); 4] = [
+        ([vec![2, 196], b"name".to_vec(), vec![200], b"Steve".to_vec()].concat(), 300),
+        ([vec![2, 196], b"name".to_vec(), vec![199], b"mondler".to_vec()].concat(), 200),
+        ([vec![2, 196], b"name".to_vec(), vec![196], b"Regena".to_vec()].concat(), 100),
+        ([vec![2, 196], b"name".to_vec(), vec![196], b"crapbag".to_vec()].concat(), 50),
+    ];
+    for (path, weight) in &paths {
+        map.write_zipper_at_path(path).set_val_w(*weight);
+    }
+    assert_eq!(map.read_zipper().agg_w(), 650);
+    for (path, weight) in &paths {
+        assert_eq!(map.read_zipper_at_path(path).val(), Some(weight));
     }
 }
 

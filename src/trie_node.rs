@@ -374,8 +374,19 @@ pub trait TrieNodeDowncast<V: Clone + Send + Sync, A: Allocator> {
     #[cfg(not(feature="slim_ptrs"))]
     fn as_tagged_mut(&mut self) -> TaggedNodeRefMut<'_, V, A>;
 
-    /// Migrates the contents of the node into a new CellByteNode.  After this method, `self` will be empty
+    /// Migrates the contents of the node into a new CellByteNode.  After this method, `self` will be empty.
     fn convert_to_cell_node(&mut self) -> TrieNodeODRc<V, A>;
+
+    /// Weighted conversion variant. Implementations that create intermediate nodes
+    /// override this so every new node receives the aggregate of its moved payload.
+    fn convert_to_cell_node_w(&mut self) -> TrieNodeODRc<V, A>
+    where
+        V: Into<u64>,
+    {
+        let mut replacement = self.convert_to_cell_node();
+        replacement.make_mut().recompute_agg_w();
+        replacement
+    }
 }
 
 /// Special sentinel token value indicating iteration of a node has not been initialized
@@ -1701,6 +1712,13 @@ mod tagged_node_ref {
                 Self::CellByteNode(node) => node.convert_to_cell_node(),
             }
         }
+        pub fn convert_to_cell_node_w(self) -> TrieNodeODRc<V, A> where V: Into<u64> {
+            match self {
+                Self::DenseByteNode(node) => node.convert_to_cell_node_w(),
+                Self::LineListNode(node) => node.convert_to_cell_node_w(),
+                Self::CellByteNode(node) => node.convert_to_cell_node_w(),
+            }
+        }
         pub fn recompute_agg_w(&mut self) where V: Into<u64> {
             match self {
                 Self::DenseByteNode(node) => node.recompute_agg_w(),
@@ -2416,6 +2434,16 @@ mod tagged_node_ref {
                 _ => unsafe{ unreachable_unchecked() }
             }
         }
+        pub fn convert_to_cell_node_w(self) -> TrieNodeODRc<V, A> where V: Into<u64> {
+            let (ptr, tag) = self.ptr.get_raw_parts();
+            match tag {
+                EMPTY_NODE_TAG => unreachable!(),
+                DENSE_BYTE_NODE_TAG => unsafe{ &mut *ptr.cast::<DenseByteNode<V, A>>() }.convert_to_cell_node_w(),
+                LINE_LIST_NODE_TAG => unsafe{ &mut *ptr.cast::<LineListNode<V, A>>() }.convert_to_cell_node_w(),
+                CELL_BYTE_NODE_TAG => unsafe{ &mut *ptr.cast::<CellByteNode<V, A>>() }.convert_to_cell_node_w(),
+                _ => unsafe{ unreachable_unchecked() }
+            }
+        }
         pub fn recompute_agg_w(&mut self) where V: Into<u64> {
             let (ptr, tag) = self.ptr.get_raw_parts();
             match tag {
@@ -2570,6 +2598,19 @@ pub(crate) fn node_along_path_mut<'a, 'k, V: Clone + Send + Sync, A: Allocator>(
 pub(crate) fn make_cell_node<V: Clone + Send + Sync, A: Allocator>(node: &mut TrieNodeODRc<V, A>) -> bool {
     if !node.as_tagged().is_cell_node() {
         let replacement = node.make_mut().convert_to_cell_node();
+        *node = replacement;
+        true
+    } else {
+        false
+    }
+}
+
+/// Aggregate-aware node upgrade used by weighted exclusive writers.
+/// Structural conversion may introduce intermediate nodes, so their cached
+/// weights must be initialized from the payloads moved into them.
+pub(crate) fn make_cell_node_w<V: Clone + Send + Sync + Into<u64>, A: Allocator>(node: &mut TrieNodeODRc<V, A>) -> bool {
+    if !node.as_tagged().is_cell_node() {
+        let replacement = node.make_mut().convert_to_cell_node_w();
         *node = replacement;
         true
     } else {

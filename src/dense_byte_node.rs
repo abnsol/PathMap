@@ -30,7 +30,7 @@ pub struct ByteNode<Cf, A: Allocator> {
     values: Vec<Cf, A>,
     #[cfg(not(feature = "nightly"))]
     values: Vec<Cf>,
-    agg_w: u64,
+    pub(crate) agg_w: u64,
     alloc: A,
 }
 
@@ -1461,6 +1461,7 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNodeDowncast<V, A> for ByteNode<O
         for cf in values.v.into_iter() {
             replacement_node.values.push(cf.into())
         }
+        replacement_node.agg_w = self.agg_w;
         TrieNodeODRc::new_in(replacement_node, self.alloc.clone())
     }
 }
